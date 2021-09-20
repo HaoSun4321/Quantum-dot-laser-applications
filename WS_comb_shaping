@@ -1,0 +1,263 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed May  5 21:38:35 2021
+
+@author: HS
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.signal import find_peaks
+import scipy.constants as sc
+import xlwt
+import cmath
+j_con = cmath.sqrt(-1)
+c = 299792458
+
+plt.close('all')
+# def ws_comb_flatten(spec_comb):
+class Waveshaper(object):
+    def __init__(self, file_name, exr, fc, bw):
+        self.N = 5001   # points of waveshaper
+        self.ws_f = np.linspace(191.25e12, 196.25e12, self.N) # fre range of WS
+        self.exr = exr
+        self.file_name = file_name
+        self.f0 = fc-bw/2
+        self.f1 = fc+bw/2
+        self.fc = fc
+        self.bw = bw
+        
+        
+    def osa_read(self):
+        data = np.loadtxt(self.file_name)
+        osa_w = data[:,0]*1e-9
+        osa_comb = data[:,1]
+        c = sc.c
+        osa_f = np.flip(c/osa_w, axis = 0)  # waveshaper uses frequency 
+        osa_comb_f = np.flip(osa_comb, axis = 0) 
+        return osa_f, osa_comb_f
+    
+    def resolution(self, f_p, p_p, fsr1, fsr2):
+        index = np.where((f_p - fsr1/2 <= self.ws_f) & (self.ws_f <= f_p + fsr2/2))
+        ws_rect = np.zeros(self.N)
+        ws_rect[index] = p_p
+        return ws_rect
+    
+    def flatten_comb(self):
+        ws_rect = self.rect(self.f0, self.f1)
+        osa_f, osa_comb_f = self.osa_read()
+        index, _ = find_peaks(osa_comb_f,distance=20, height = max(osa_comb_f)-self.exr)
+        osa_dpwr [index] = osa_dpwr[index] + osa_comb_f[index] - min(osa_comb_f[index])
+        ws_dpwr = 0
+        # i = index[0]
+        for i in range(len(index)-1):
+            if i ==0 & i == len(index)-1:
+                ws_dpwr += self.resolution(osa_f[index[i]], osa_dpwr[index[i]], osa_f[index[i+1]] - osa_f[index[i]], osa_f[index[i+1]] - osa_f[index[i]])
+            else:        
+                ws_dpwr += self.resolution(osa_f[index[i]], osa_dpwr[index[i]], osa_f[index[i]] - osa_f[index[i-1]], osa_f[index[i+1]] - osa_f[index[i]])
+                
+        # for i in range(len(index)-1):
+            
+        #         ws_dpwr += self.resolution(osa_f[index[i]], osa_dpwr[index[i]], osa_f[index[i+1]] - osa_f[index[i]], osa_f[index[i+1]] - osa_f[index[i]])
+            
+
+        # ws_dpwr = np.interp(self.ws_f, f_fsr, fsr_dpwr) + ws_rect
+        ws_dpwr = ws_dpwr + ws_rect
+        ws_dpwr[ws_dpwr > 60] = 60
+        return self.ws_f, ws_dpwr, index
+        # return ws_f, ws_dpwr
+    
+    def rect(self, f0, f1):
+        index = np.where((f0 < self.ws_f) & (self.ws_f < f1))
+        ws_rect = np.zeros(self.N) + 60
+        ws_rect[index] = 0
+        return ws_rect
+    
+    def gaussian(self, bw_gs):
+        ws_f, ws_dpwr, index = self.flatten_comb()
+        c = bw_gs/(2*np.sqrt(2*np.log(2)))
+        gs = np.exp(-(self.ws_f - self.fc)**2/2/c**2)
+        gs_log = 10*np.log10(gs)
+        ws_dpwr -= gs_log
+        ws_dpwr[ws_dpwr > 60] = 60
+        
+        return self.ws_f, ws_dpwr
+    
+    def sampling(self, n_pass, dc):
+        ws_f, ws_dpwr, index = self.flatten_comb()
+        bw_pass = self.bw / n_pass * dc
+        index_list1 = []
+        for k in range(n_pass):
+            # i = k+1
+            fc = self.f0 + (k+0.5)*bw_pass / dc
+            f0 = fc - bw_pass/2
+            f1 = fc + bw_pass/2
+            index = np.where((f0 < self.ws_f) & (self.ws_f < f1))
+            index_list1.append(index)
+        
+        index_list = [item for sublist in index_list1 for item in sublist] 
+        ws_sample = np.zeros(self.N) + 60
+        for index in index_list:
+
+            ws_sample[index] = 0
+        ws_dpwr += ws_sample
+        ws_dpwr[ws_dpwr > 60] = 60
+        
+        return self.ws_f, ws_dpwr
+    
+    def im_process(self, im_input):
+        ws_f, ws_dpwr, index = self.flatten_comb()
+        f_im = np.linspace(self.f0, self.f1, len(im_input))
+        im_out = np.interp(self.ws_f, f_im, im_input)
+        im_out_log = 10*np.log10(im_out)
+        ws_dpwr -= im_out_log
+        ws_dpwr[ws_dpwr > 60] = 60
+        
+        return f_im, self.ws_f, ws_dpwr, im_out
+    
+    def flat_top(self, dispersion, f1, f2):
+        ws_f, ws_dpwr, index = self.flatten_comb()
+        sinc2 = np.sinc(2 * f2 * dispersion * (c/ws_f - c/self.fc))
+        sinc1 = np.sinc(2 * f1 * dispersion * (c/ws_f -c/ self.fc))
+        profile = 2*f2*sinc2 - 2*f1*sinc1
+    
+        neg_index = np.where(profile<=0)
+        profile_log = 10 * np.log10(abs(profile)/max((profile)))
+        ws_dpwr -= profile_log
+        ws_dpwr[ws_dpwr > 60] = 60
+        return ws_f, ws_dpwr, neg_index
+    
+    def flat_top_v2(self, dispersion, f_0, f2):
+        ws_f, ws_dpwr, index = self.flatten_comb()
+        sinc1 = np.sinc(2 * f2 * dispersion * (c/ws_f - c/self.fc)) 
+        sinc2 = np.exp(j_con*2*np.pi*f_0* dispersion * (c/ws_f - c/self.fc))
+        profile = sinc1
+        
+        phase = np.angle(sinc2)
+        
+        neg_index = np.where(profile<=0)
+        profile_log = 10 * np.log10(abs(profile)/max((profile)))
+        ws_dpwr -= profile_log
+        ws_dpwr[ws_dpwr > 60] = 60
+        return ws_f, ws_dpwr, neg_index, phase
+    
+    def triangle(self, dispersion, f_0, f2):
+        ws_f, ws_dpwr, index = self.flatten_comb()
+        sinc = (np.sinc(2 * f2 * dispersion * (c/ws_f - c/self.fc)))**2 * np.cos(2*np.pi*f_0* dispersion * (c/ws_f - c/self.fc))
+
+        profile = sinc
+    
+        neg_index = np.where(profile<=0)
+        profile_log = 10 * np.log10(abs(profile)/max((profile)))
+        ws_dpwr -= profile_log
+        ws_dpwr[ws_dpwr > 60] = 60
+        return ws_f, ws_dpwr, neg_index
+        
+        
+def ws_write(ws_f, ws_dpwr, ws_phase, ws_port, file_path):
+    
+    workbook = xlwt.Workbook(encoding='utf-8')
+    booksheet = workbook.add_sheet('Sheet 1', cell_overwrite_ok=True)
+    for i in range(len(ws_f)):
+        booksheet.write(i,0,ws_f[i]*1e-12)
+        booksheet.write(i,1,ws_dpwr[i])
+        booksheet.write(i,2,ws_phase[i])
+        booksheet.write(i,3,ws_port[i]) 
+        
+    workbook.save(file_path)
+
+    
+path = '/Users/zxy/Desktop/Research/PHD/QDL/2021-06-08/'
+
+file_name = path + 'origin.txt'    
+
+data = np.loadtxt(file_name)
+osa_w = data[:,0]*1e-9
+osa_comb = data[:,1]
+c = sc.c
+osa_f = np.flip(c/osa_w, axis = 0)  # waveshaper uses frequency 
+osa_comb_f = np.flip(osa_comb, axis = 0) 
+osa_dpwr = np.zeros(len(osa_comb_f))
+osa_comb_dot = np.zeros(len(osa_comb_f))
+
+## ws file parameter
+N = 5001
+f0 = 191.25e12
+f1 = 196.25e12
+ws_f = np.linspace(f0,f1, N) # waveshaper user defined file
+
+
+
+exr = 10
+
+
+WS1 = Waveshaper(file_name, exr, (195.705)*1e12, 1e12) #195.67e12 c/1532e-9  (195.71)*1e12
+
+####### MWP Filter ########
+# ws_f, ws_dpwr, index = WS1.flatt1en_comb()
+# bw_gs = 0.5e12
+# ws_f, ws_dpwr = WS1.gaussian(bw_gs)
+# n_pass = 2
+# dc = 0.5
+# ws_f, ws_dpwr = WS1.sampling(n_pass, dc)
+f1 = (0)*1e9
+f2 = (0.15)*1e9  #<1.5e9
+bw = f1-f2
+
+dispersion = 1660e-3
+ws_f, ws_dpwr, neg_index = WS1.flat_top(dispersion, f1, f2)
+# f2 = 0.35e9
+f_shift = -0e9
+# dispersion = 1660e-3
+# ws_f, ws_dpwr, neg_index, ws_phase = WS1.flat_top_v2(dispersion, f_shift, f2)
+# ws_f, ws_dpwr, neg_index = WS1.triangle(dispersion, f_shift, f2)
+
+
+
+
+####### im process #######
+
+# f_im, ws_f, ws_dpwr, im_out = WS1.im_process(im_fla_nor)
+
+# file_name_exp = path + 'im_0_exp.txt'
+# WS2 = Waveshaper(file_name_exp, exr, 195.5e12, 1.4e12)
+
+# f_exp, im_exp = WS2.osa_read()
+# im_exp_lin = 10**(im_exp/10)
+# im_exp_lin = im_exp_lin / max(im_exp_lin)
+
+##########################
+
+ws_phase = np.zeros(len(ws_f))
+ws_port = np.ones(len(ws_f))
+ws_port[neg_index] = 2
+
+# plt.plot(ws_f, ws_dpwr, 'o')
+# plt.plot(f_im, im_fla_nor, 'X')
+# ws_write(ws_f, ws_dpwr, ws_phase, ws_port, path+'flatten_40.xls')
+# ws_write(ws_f, ws_dpwr, ws_phase, ws_port, path+'bandpass'+str(f1*1e-9)+'_'+str(f2*1e-9)+'.xls')
+# ws_write(ws_f, ws_dpwr, ws_phase, ws_port, path+'sample_'+str(n_pass)+'channel'+str(dc*100)+'%DC.xls')
+# ws_write(ws_f, ws_dpwr, ws_phase, ws_port, path+'gs_bw'+str(round(bw_gs*1e-9))+'GHz.xls')
+# ws_write(ws_f, ws_dpwr, ws_phase, ws_port, path+'im_0.xls')
+ws_write(ws_f, ws_dpwr, ws_phase, ws_port, path+'bandpass_flat_bw'+str(2*f2*1e-9)+'_f_shift'+str(f_shift*1e-9)+'.xls')
+ 
+osa_dpwr = np.interp(osa_f, ws_f, ws_dpwr)
+osa_port = np.interp(osa_f, ws_f, ws_port)
+osa_phase = np.interp(osa_f, ws_f, ws_phase)
+test  = 10**((osa_comb_f-osa_dpwr)/10)
+test = test/max(test)# np.exp(j_con*ws_phase)
+
+test[np.where(osa_port == 2)] = -test[np.where(osa_port == 2)]
+test = test * np.exp(j_con*osa_phase)
+plt.figure(1)
+
+# plt.plot(osa_f[index], osa_comb_f[index], 'X')
+plt.plot(osa_f, osa_comb_f)
+plt.plot(osa_f, 10*np.log10(test))
+# plt.plot(osa_f[index], test[index], 'X')
+# plt.plot(ws_f, im_out)
+# plt.plot(f_exp, im_exp_lin)
+
+plt.plot(ws_f, ws_dpwr, 'X')
+
+
